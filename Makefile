@@ -1,32 +1,55 @@
-GOARCH = amd64
+TOOL?=vault-plugin-helloworld
+TEST?=$$(go list ./... | grep -v /vendor/ | grep -v teamcity)
+VETARGS?=-asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtags -unsafeptr
+EXTERNAL_TOOLS=\
+	github.com/mitchellh/gox \
+	github.com/golang/dep/cmd/dep
+BUILD_TAGS?=${TOOL}
+GOFMT_FILES?=$$(find . -name '*.go' | grep -v vendor)
 
-UNAME = $(shell uname -s)
+# bin generates the releaseable binaries for this plugin
+bin: fmtcheck generate
+	@CGO_ENABLED=0 BUILD_TAGS='$(BUILD_TAGS)' sh -c "'$(CURDIR)/scripts/build.sh'"
 
-ifndef OS
-	ifeq ($(UNAME), Linux)
-		OS = linux
-	else ifeq ($(UNAME), Darwin)
-		OS = darwin
-	endif
-endif
+default: dev
 
-.DEFAULT_GOAL := all
+# dev creates binaries for testing Vault locally. These are put
+# into ./bin/ as well as $GOPATH/bin.
+dev: fmtcheck generate
+	@CGO_ENABLED=0 BUILD_TAGS='$(BUILD_TAGS)' VAULT_DEV_BUILD=1 sh -c "'$(CURDIR)/scripts/build.sh'"
 
-all: fmt build start
+# testshort runs the quick unit tests and vets the code
+test: fmtcheck generate
+	CGO_ENABLED=0 VAULT_TOKEN= VAULT_ACC= go test -v -short -tags='$(BUILD_TAGS)' $(TEST) $(TESTARGS) -count=1 -timeout=20m -parallel=4
 
-build:
-	GOOS=$(OS) GOARCH="$(GOARCH)" go build -o vault/plugins/mock cmd/mock/main.go
+# test runs the unit tests and vets the code
+testrace: fmtcheck generate
+	CGO_ENABLED=1 VAULT_TOKEN= VAULT_ACC= go test -race -v -tags='$(BUILD_TAGS)' $(TEST) $(TESTARGS) -count=1 -timeout=20m -parallel=4
 
-start:
-	vault server -dev -dev-root-token-id=root -dev-plugin-dir=./vault/plugins
+testcompile: fmtcheck generate
+	@for pkg in $(TEST) ; do \
+		go test -v -c -tags='$(BUILD_TAGS)' $$pkg -parallel=4 ; \
+	done
 
-enable:
-	vault secrets enable mock
+# generate runs `go generate` to build the dynamically generated
+# source files.
+generate:
+	go generate $(go list ./... | grep -v /vendor/)
 
-clean:
-	rm -f ./vault/plugins/mock
+# bootstrap the build by downloading additional tools
+bootstrap:
+	@for tool in  $(EXTERNAL_TOOLS) ; do \
+		echo "Installing/Updating $$tool" ; \
+		go get -u $$tool; \
+	done
+
+fmtcheck:
+	@sh -c "'$(CURDIR)/scripts/gofmtcheck.sh'"
 
 fmt:
-	go fmt $$(go list ./...)
+	gofmt -w $(GOFMT_FILES)
 
-.PHONY: build clean fmt start enable
+proto:
+	protoc *.proto --go_out=plugins=grpc:.
+
+.PHONY: bin default generate test vet bootstrap fmt fmtcheck
